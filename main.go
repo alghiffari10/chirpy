@@ -21,11 +21,18 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 func (cfg *apiConfig) metricHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
 	hits := cfg.fileServerHits.Load()
-	message := fmt.Sprintf("Hits: %v", hits)
+	message := fmt.Sprintf(`
+<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %v times!</p>
+  </body>
+</html>
+		`, hits)
 
 	w.Write([]byte(message))
 
@@ -56,15 +63,15 @@ func main() {
 		),
 	)
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	mux.HandleFunc("/metrics", apiCfg.metricHandler)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.metricHandler)
 
-	mux.HandleFunc("/reset", apiCfg.resetHandler)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 
 	log.Printf("Server is running on port %s\n", port)
 	log.Fatal(server.ListenAndServe())
