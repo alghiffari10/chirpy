@@ -1,18 +1,26 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
-)
+	"time"
 
-var port = ":8080"
+	"github.com/alghiffari10/chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+)
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+	db             *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -41,13 +49,19 @@ func (cfg *apiConfig) metricHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
-	var reset int32 = 0
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err := cfg.db.DeleteAllUser(r.Context()); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't reset the database")
+	}
+
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-
-	cfg.fileServerHits.Store(reset)
-
-	w.Write([]byte("Reset the metrics"))
+	w.Write([]byte("Reset users data"))
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -112,7 +126,7 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	params := validateMessage{}
 	if err := decoder.Decode(&params); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error decoding paarameters")
+		respondWithError(w, http.StatusInternalServerError, "Error decoding parameters")
 		w.WriteHeader(500)
 		return
 	}
@@ -130,8 +144,68 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (cfg *apiConfig) userHandler(w http.ResponseWriter, r *http.Request) {
+	type emailRequest struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := emailRequest{}
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error decoding paarameters")
+		w.WriteHeader(500)
+		return
+	}
+
+	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Email:     params.Email,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Failed insert user")
+		return
+	}
+	type userResponse struct {
+		Id        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+
+	respondWithJSON(w, http.StatusCreated, userResponse{
+		Id:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
+}
+
 func main() {
-	apiCfg := apiConfig{}
+	godotenv.Load()
+
+	port := os.Getenv("PORT")
+
+	dbUrl := os.Getenv("DB_URL")
+
+	platform := os.Getenv("PLATFORM")
+	if dbUrl == "" {
+		log.Fatal("DB_URL must be set")
+	}
+
+	db, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		log.Fatalf("Can't connect to db: %v", err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiCfg := apiConfig{
+		fileServerHits: atomic.Int32{},
+		db:             dbQueries,
+		platform:       platform,
+	}
 	mux := http.NewServeMux()
 
 	server := &http.Server{
@@ -153,6 +227,8 @@ func main() {
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
+	mux.HandleFunc("POST /api/users", apiCfg.userHandler)
+
 	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 
 	log.Printf("Server is running on port %s\n", port)
