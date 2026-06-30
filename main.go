@@ -113,10 +113,11 @@ func badWordFilter(input string) string {
 	return strings.Join(words, " ")
 }
 
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) chirpHandler(w http.ResponseWriter, r *http.Request) {
 
 	type validateMessage struct {
-		Body string `json:"body"`
+		Body   string    `json:"body"`
+		UserId uuid.UUID `json:"user_id"`
 	}
 
 	type validResponse struct {
@@ -138,8 +139,31 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 
 	cleanedVersion := badWordFilter(params.Body)
 
-	respondWithJSON(w, http.StatusOK, validResponse{
-		CleanedBody: cleanedVersion,
+	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Body:      cleanedVersion,
+		UserID:    params.UserId,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Failed to create chip")
+	}
+
+	type chirpResponse struct {
+		Id        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserId    uuid.UUID `json:"user_id"`
+	}
+
+	respondWithJSON(w, http.StatusCreated, chirpResponse{
+		Id:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserId:    chirp.UserID,
 	})
 
 }
@@ -229,7 +253,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.userHandler)
 
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.chirpHandler)
 
 	log.Printf("Server is running on port %s\n", port)
 	log.Fatal(server.ListenAndServe())
