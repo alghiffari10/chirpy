@@ -3,11 +3,15 @@ INSERT INTO users (
   id,
   created_at,
   updated_at,
-  email
+  email,
+  hashed_password
 ) VALUES ( 
-$1, $2, $3, $4
+$1, $2, $3, $4, $5
 ) RETURNING *;
 
 -- name: DeleteAllUser :exec
 DELETE  from users;
 
+-- name: LoginUser :one
+SELECT * 
+FROM users WHERE email = $1;
