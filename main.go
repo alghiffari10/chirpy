@@ -22,6 +22,7 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -117,19 +118,29 @@ func badWordFilter(input string) string {
 func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
 
 	type validateMessage struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type validResponse struct {
 		CleanedBody string `json:"cleaned_body"`
 	}
 
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Missing or invalid authorization header")
+		return
+	}
+
+	userId, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid token")
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := validateMessage{}
 	if err := decoder.Decode(&params); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error decoding parameters")
-		w.WriteHeader(500)
 		return
 	}
 
@@ -145,7 +156,7 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Body:      cleanedVersion,
-		UserID:    params.UserId,
+		UserID:    userId,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Failed to create chip")
@@ -273,11 +284,12 @@ func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// TODO: implement Handler
+// TODO: Update your POST /api/login endpoint. It should accept a new, optional expires_in_seconds
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type loginRequest struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds *int   `json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -292,38 +304,58 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Email is not exist")
 		return
 	}
+
 	matched, err := auth.CheckPasswordHash(params.Password, userLogin.HashedPassword)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error compare hashed password")
 		return
 	}
 
-	if matched != true {
+	if !matched {
 		respondWithError(w, http.StatusUnauthorized, "Password is not matched")
 		return
-	} else {
-		type userResponse struct {
-			Id        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Email     string    `json:"email"`
-		}
-		respondWithJSON(w, http.StatusOK, userResponse{
-			Id:        userLogin.ID,
-			CreatedAt: userLogin.CreatedAt,
-			UpdatedAt: userLogin.UpdatedAt,
-			Email:     userLogin.Email,
-		})
 	}
 
+	expiresIn := time.Hour
+
+	if params.ExpiresInSeconds != nil {
+		duration := time.Duration(*params.ExpiresInSeconds) * time.Second
+
+		if duration > 0 && duration < time.Hour {
+			expiresIn = duration
+		}
+	}
+
+	token, err := auth.MakeJWT(userLogin.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create JWT")
+		return
+	}
+	type userResponse struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}
+	respondWithJSON(w, http.StatusOK, userResponse{
+		ID:        userLogin.ID,
+		CreatedAt: userLogin.CreatedAt,
+		UpdatedAt: userLogin.UpdatedAt,
+		Email:     userLogin.Email,
+		Token:     token,
+	})
 }
 
 func main() {
 	godotenv.Load()
 
 	port := os.Getenv("PORT")
-
 	dbUrl := os.Getenv("DB_URL")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is not set")
+	}
 
 	platform := os.Getenv("PLATFORM")
 	if dbUrl == "" {
@@ -341,6 +373,7 @@ func main() {
 		fileServerHits: atomic.Int32{},
 		db:             dbQueries,
 		platform:       platform,
+		jwtSecret:      jwtSecret,
 	}
 	mux := http.NewServeMux()
 
